@@ -8,7 +8,7 @@ import {
   TicketPdfGeneratorProvider,
   TicketStoragePathFactory,
 } from './providers';
-import { R2StorageService } from '@/infra/storage';
+import { S3StorageService } from '@/infra/storage';
 import { HTTP_UPLOADER } from '@/infra/http/http.module';
 import { HttpClientService } from '@/infra/http/http-client.service';
 import { IEmailsMessageProducer } from '@/infra/messages/producers/emails/interfaces/iemails-message-producer.interface';
@@ -24,7 +24,7 @@ export class TicketsService {
     private readonly ticketsRepository: TicketsRepository,
     private readonly ordersRepository: OrdersRepository,
     private readonly ticketPdfGeneratorProvider: TicketPdfGeneratorProvider,
-    private readonly r2StorageService: R2StorageService,
+    private readonly s3StorageService: S3StorageService,
     private readonly ticketStoragePathFactory: TicketStoragePathFactory,
     private readonly configService: ConfigService,
     private readonly emailsMessageProducer: IEmailsMessageProducer,
@@ -88,7 +88,7 @@ export class TicketsService {
           owner_id: createdTicket.owner_id,
         });
 
-        const response = await this.r2StorageService.createPresignedUploadUrl(
+        const response = await this.s3StorageService.createPresignedUploadUrl(
           ticketKey,
           2000,
           'application/pdf',

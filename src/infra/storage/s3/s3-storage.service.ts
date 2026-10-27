@@ -20,30 +20,26 @@ import { ICloudStorageService } from '@/infra/storage';
 import { PreSignedResponse } from '@/infra/storage/models';
 
 @Injectable()
-export class R2StorageService implements ICloudStorageService {
-  private readonly logger: Logger = new Logger(R2StorageService.name);
+export class S3StorageService implements ICloudStorageService {
+  private readonly logger = new Logger(S3StorageService.name);
+
   private readonly s3Client: S3Client;
-  private bucket: string;
-  private readonly MAX_OBJECT_SIZE_IN_BYTES: number = 7 * 1024 * 1024; // 7 Mb
-  private readonly VALID_OBJECT_CONTENT_TYPES: string[] = [
+  private readonly bucket: string;
+
+  private readonly MAX_OBJECT_SIZE_IN_BYTES = 7 * 1024 * 1024;
+
+  private readonly VALID_OBJECT_CONTENT_TYPES = [
     'image/png',
-    'image/jpg',
     'image/jpeg',
     'image/webp',
   ];
 
   constructor(private readonly configService: ConfigService) {
     this.s3Client = new S3Client({
-      credentials: {
-        accessKeyId: this.configService.get<string>('r2.access_key'),
-        secretAccessKey: this.configService.get<string>('r2.secret_access_key'),
-      },
-      endpoint: this.configService.get<string>('r2.endpoint'),
-      region: this.configService.get<string>('r2.region'),
-      forcePathStyle: true,
+      region: this.configService.getOrThrow<string>('aws.region'),
     });
 
-    this.bucket = this.configService.get<string>('r2.bucket');
+    this.bucket = this.configService.getOrThrow<string>('aws.s3.bucket');
   }
 
   async createPresignedUploadUrl(
@@ -58,21 +54,25 @@ export class R2StorageService implements ICloudStorageService {
         ContentType: contentType,
       });
 
-      this.logger.log('Successfully created Pre-Signed URL');
-
       const uploadUrl = await getSignedUrl(this.s3Client, command, {
         expiresIn,
       });
 
+      this.logger.log(`Successfully generated presigned URL for key=${key}`);
+
       return {
         key,
         uploadUrl,
-        publicUrl: this.configService.get<string>('r2.public_url'),
+        publicUrl: this.configService.get<string>('aws.s3.public_url'),
       };
     } catch (error) {
-      this.logger.error(error);
+      this.logger.error(
+        `Failed to generate presigned URL for key=${key}`,
+        error instanceof Error ? error.stack : String(error),
+      );
+
       throw new InternalServerErrorException(
-        `An error has occured while trying to generate pre-signed URL for ${key}`,
+        `Failed to generate presigned URL for ${key}`,
       );
     }
   }
@@ -87,19 +87,31 @@ export class R2StorageService implements ICloudStorageService {
       );
 
       await this.validateObjectImageFile(key, object);
-    } catch (err: any) {
-      const status = err?.$metadata?.httpStatusCode;
+    } catch (error) {
+      const status =
+        error instanceof Error && '$metadata' in error
+          ? (
+              error as Error & {
+                $metadata?: { httpStatusCode?: number };
+              }
+            ).$metadata?.httpStatusCode
+          : undefined;
 
-      if (err?.name === 'NotFound' || status === 404) {
-        this.logger.error(`File not found in storage: ${key}`);
+      if (status === 404) {
+        this.logger.warn(`File not found in S3: ${key}`);
+
         throw new BadRequestException(`File not found in storage: ${key}`);
       }
 
-      if (err instanceof HttpException) {
-        throw err;
+      if (error instanceof HttpException) {
+        throw error;
       }
 
-      this.logger.error(`Failed to verify file in storage: ${key}`, err);
+      this.logger.error(
+        `Failed to verify file in S3: ${key}`,
+        error instanceof Error ? error.stack : String(error),
+      );
+
       throw new InternalServerErrorException(
         `Failed to verify file in storage: ${key}`,
       );
@@ -115,38 +127,47 @@ export class R2StorageService implements ICloudStorageService {
         }),
       );
 
-      this.logger.log(`Successfully removed file ${key} from storage!`);
-    } catch (err: any) {
-      const status = err?.$metadata?.httpStatusCode;
+      this.logger.log(`Successfully removed file ${key} from S3`);
+    } catch (error) {
+      this.logger.error(
+        `Failed to remove file from S3: ${key}`,
+        error instanceof Error ? error.stack : String(error),
+      );
 
-      if (err?.name === 'NotFound' || status === 404) {
-        this.logger.error(`File not found in storage: ${key}`);
-        throw new BadRequestException(`File not found in storage: ${key}`);
-      }
+      throw new InternalServerErrorException(
+        `Failed to remove file from S3: ${key}`,
+      );
     }
   }
 
-  async validateObjectImageFile(
+  private async validateObjectImageFile(
     key: string,
     object: HeadObjectCommandOutput,
   ): Promise<void> {
-    if (!this.VALID_OBJECT_CONTENT_TYPES.includes(object.ContentType)) {
+    if (!this.VALID_OBJECT_CONTENT_TYPES.includes(object.ContentType ?? '')) {
       await this.removeObject(key);
+
       this.logger.error(
-        `Invalid content type object ${key} of content type ${object.ContentType}`,
+        `Invalid content type for object ${key}: ${object.ContentType}`,
       );
+
       throw new UnprocessableEntityException(
         'Invalid object content type! Object should be an image file!',
       );
     }
 
-    if (object.ContentLength > this.MAX_OBJECT_SIZE_IN_BYTES) {
+    if (
+      object.ContentLength === undefined ||
+      object.ContentLength > this.MAX_OBJECT_SIZE_IN_BYTES
+    ) {
       await this.removeObject(key);
+
       this.logger.error(
-        `Invalid content length object ${key} of content length ${object.ContentLength}`,
+        `Invalid content length for object ${key}: ${object.ContentLength}`,
       );
+
       throw new UnprocessableEntityException(
-        `Object shouldn't surpass the max content length of ${this.MAX_OBJECT_SIZE_IN_BYTES} bytes!`,
+        `Object shouldn't surpass ${this.MAX_OBJECT_SIZE_IN_BYTES} bytes!`,
       );
     }
   }

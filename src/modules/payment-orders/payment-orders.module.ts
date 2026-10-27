@@ -11,7 +11,7 @@ import { MessagesModule } from '@/infra/messages/messages.module';
 @Module({
   providers: [PaymentOrdersService, PaymentOrdersRepository],
   imports: [
-    OrdersModule,
+    forwardRef(() => OrdersModule),
     EventTicketReservationsModule,
     EventTicketsModule,
     PaymentGatewayModule,

@@ -5,7 +5,7 @@ import {
   Logger,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { inArray } from 'drizzle-orm';
+import { inArray, eq } from 'drizzle-orm';
 import { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import * as schemas from '@/infra/database/orm/drizzle/schemas';
@@ -20,6 +20,10 @@ import { PaymentGatewayWebhookEventsRepository } from '@/infra/payment-gateway/p
 import { PaymentFailedPayload } from '@/infra/messages/consumers/models';
 import { IEmailsMessageProducer } from '@/infra/messages/producers/emails/interfaces/iemails-message-producer.interface';
 import { EmailTemplateType } from '../emails/enums/email-template-type.enum';
+import { DateProvider } from '../shared/providers';
+import { InsertPaymentOrdersParams } from './models/insert-payment-orders-params.model';
+import { CheckoutSessionData } from '@/infra/payment-gateway/stripe/models';
+import { PaymentProviders } from './enum';
 
 @Injectable()
 export class PaymentOrdersService {
@@ -34,6 +38,7 @@ export class PaymentOrdersService {
     private readonly eventTicketsRepository: EventTicketsRepository,
     private readonly paymentGatewayWebhookEventsRepository: PaymentGatewayWebhookEventsRepository,
     private readonly emailMessageProducer: IEmailsMessageProducer,
+    private readonly dateProvider: DateProvider,
   ) {}
 
   async handleSuccessPaymentOrder(
@@ -219,5 +224,55 @@ export class PaymentOrdersService {
         e?.stack,
       );
     }
+  }
+
+  async create(data: InsertPaymentOrdersParams): Promise<void> {
+    await this.paymentOrdersRepository.create(data);
+
+    this.logger.log(`Created new payment for order=${data.order_id}`);
+  }
+
+  async findLastPaymentOrderByOrderBy(
+    order_id: string,
+  ): Promise<PaymentOrderEntity> {
+    return await this.paymentOrdersRepository.findLastPaymentOrderByOrderBy(
+      order_id,
+    );
+  }
+
+  async update(paymentOrder: PaymentOrderEntity): Promise<void> {
+    return await this.paymentOrdersRepository.update(paymentOrder);
+  }
+
+  async updateAndCreateNewPaymentOrderTransaction(
+    checkout_session_data: CheckoutSessionData,
+    payment_order: PaymentOrderEntity,
+  ): Promise<void> {
+    await this.drizzle.transaction(async (trx) => {
+      await trx
+        .update(schemas.payment_orders)
+        .set({
+          ...payment_order,
+        })
+        .where(eq(schemas.payment_orders.id, payment_order.id));
+
+      await trx.insert(schemas.payment_orders).values({
+        order_id: payment_order.order_id,
+        amount: payment_order.amount,
+        currency: 'USD',
+        provider: PaymentProviders[payment_order.provider],
+        provider_reference_id: checkout_session_data.provider_reference_id,
+        status: 'PENDING',
+        checkout_url: checkout_session_data.checkout_url,
+        checkout_url_expires_at: new Date(
+          this.dateProvider.unixToTimestampTz(
+            checkout_session_data.checkout_url_expires_at,
+            'America/Sao_Paulo',
+          ),
+        ),
+      });
+    });
+
+    return;
   }
 }

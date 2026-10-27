@@ -12,6 +12,7 @@ import { TicketsModule } from './modules/tickets/tickets.module';
 import { EmailsModule } from './modules/emails/emails.module';
 import { SMTPModule } from './infra/smtp/smtp.module';
 import { PaymentOrdersModule } from './modules/payment-orders/payment-orders.module';
+import { EventsModule } from './modules/events/events.module';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { PaymentOrdersModule } from './modules/payment-orders/payment-orders.mod
     EmailsModule,
     SMTPModule,
     PaymentOrdersModule,
+    EventsModule,
   ],
   providers: [
     {

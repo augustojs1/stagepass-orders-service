@@ -7,7 +7,7 @@ import {
   TicketPdfGeneratorProvider,
   TicketStoragePathFactory,
 } from './providers';
-import { R2StorageService } from '@/infra/storage';
+import { S3StorageService } from '@/infra/storage';
 import { AppHttpModule } from '@/infra/http/http.module';
 import { MessagesModule } from '@/infra/messages/messages.module';
 
@@ -17,8 +17,9 @@ import { MessagesModule } from '@/infra/messages/messages.module';
     TicketsService,
     TicketsRepository,
     TicketPdfGeneratorProvider,
-    R2StorageService,
+    S3StorageService,
     TicketStoragePathFactory,
+    MessagesModule,
   ],
   exports: [TicketsService],
 })

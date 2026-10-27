@@ -9,6 +9,7 @@ import { PgTransaction } from 'drizzle-orm/pg-core';
 import * as schema from '@/infra/database/orm/drizzle/schemas';
 import { DATABASE_TAG } from '@/infra/database/orm/drizzle/drizzle.module';
 import { PaymentGatewayWebhookEventsEntity } from './models/payment-gateway-webhook-events-entity.model';
+import { InsertPaymentGatewayWebhookEventParams } from './models/insert-payment-gateway-webhook-event-params.model';
 
 @Injectable()
 export class PaymentGatewayWebhookEventsRepository {
@@ -16,6 +17,15 @@ export class PaymentGatewayWebhookEventsRepository {
     @Inject(DATABASE_TAG)
     private readonly drizzle: PostgresJsDatabase<typeof schema>,
   ) {}
+
+  async insert(data: InsertPaymentGatewayWebhookEventParams): Promise<void> {
+    await this.drizzle
+      .insert(schema.payment_gateway_webhook_events)
+      .values(data)
+      .onConflictDoNothing({
+        target: [schema.payment_gateway_webhook_events.provider_reference_id],
+      });
+  }
 
   async updateByProviderReferenceIdTrx(
     trx: PgTransaction<
