@@ -40,11 +40,14 @@ export const configuration = () => ({
       bucket: process.env.AWS_S3_BUCKET,
     },
     sqs: {
-      ticketsQueueUrl: process.env.AWS_SQS_TICKETS_QUEUE_URL,
-      emailQueueUrl: process.env.AWS_SQS_EMAIL_QUEUE_URL,
+      tickets_generate_queue_url: process.env.AWS_SQS_TICKETS_QUEUE_URL,
+      emails_queue_url: process.env.AWS_SQS_EMAIL_QUEUE_URL,
+      payment_success_queue_url: process.env.AWS_SQS_PAYMENT_SUCCESS,
+      payment_failed_queue_url: process.env.AWS_SQS_PAYMENT_FAILED,
     },
   },
   stripe: {
     secret_key: process.env.STRIPE_SECRET_KEY,
+    webhook_key: process.env.STRIPE_WEBHOOK_KEY,
   },
 });

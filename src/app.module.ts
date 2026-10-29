@@ -13,6 +13,7 @@ import { EmailsModule } from './modules/emails/emails.module';
 import { SMTPModule } from './infra/smtp/smtp.module';
 import { PaymentOrdersModule } from './modules/payment-orders/payment-orders.module';
 import { EventsModule } from './modules/events/events.module';
+import { PaymentGatewayModule } from './infra/payment-gateway/payment-gateway.module';
 
 @Module({
   imports: [
@@ -31,6 +32,7 @@ import { EventsModule } from './modules/events/events.module';
     SMTPModule,
     PaymentOrdersModule,
     EventsModule,
+    PaymentGatewayModule,
   ],
   providers: [
     {

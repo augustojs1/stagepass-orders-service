@@ -1,6 +1,5 @@
-import { Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 
-import { DATABASE_TAG } from '@/infra/database/orm/drizzle/drizzle.module';
 import { EventsRepository } from './events.repository';
 import { EventTicketsEntity, EventsEntity } from './models';
 
@@ -8,10 +7,7 @@ import { EventTicketsEntity, EventsEntity } from './models';
 export class EventsService {
   private readonly logger: Logger = new Logger(EventsService.name);
 
-  constructor(
-    @Inject(DATABASE_TAG)
-    private readonly eventsRepository: EventsRepository,
-  ) {}
+  constructor(private readonly eventsRepository: EventsRepository) {}
 
   async findOneElseThrow(id: string): Promise<EventsEntity> {
     const event = await this.eventsRepository.findById(id);

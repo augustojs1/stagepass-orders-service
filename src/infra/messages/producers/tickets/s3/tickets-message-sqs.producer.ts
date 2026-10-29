@@ -14,7 +14,7 @@ export class TicketsMessageSqsProducer implements ITicketsMessageProducer {
     private readonly configService: ConfigService,
   ) {
     this.queueUrl = this.configService.getOrThrow<string>(
-      'aws.sqs.ticketsQueueUrl',
+      'aws.sqs.tickets_generate_queue_url',
     );
   }
 

@@ -1,5 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
+import * as express from 'express';
+import * as cookieParser from 'cookie-parser';
 
 import { AppModule } from './app.module';
 import { AppExceptionFilter } from '@/infra/filters';
@@ -9,6 +11,8 @@ async function bootstrap() {
   const NODE_ENV = process.env.NODE_ENV;
 
   const app = await NestFactory.create(AppModule);
+
+  app.use(cookieParser());
 
   app.useGlobalPipes(
     new ValidationPipe({
@@ -21,6 +25,13 @@ async function bootstrap() {
   );
 
   app.useGlobalFilters(new AppExceptionFilter());
+
+  app.setGlobalPrefix('api/v1');
+
+  app.use(
+    '/api/v1/webhooks/payment/stripe',
+    express.raw({ type: 'application/json' }),
+  );
 
   await app.startAllMicroservices();
   await app.listen(PORT);

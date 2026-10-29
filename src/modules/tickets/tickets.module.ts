@@ -19,7 +19,6 @@ import { MessagesModule } from '@/infra/messages/messages.module';
     TicketPdfGeneratorProvider,
     S3StorageService,
     TicketStoragePathFactory,
-    MessagesModule,
   ],
   exports: [TicketsService],
 })

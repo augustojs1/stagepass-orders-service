@@ -15,7 +15,7 @@ export class EmailsMessageSqsProducer implements IEmailsMessageProducer {
     private readonly configService: ConfigService,
   ) {
     this.queueUrl = this.configService.getOrThrow<string>(
-      'aws.sqs.emailQueueUrl',
+      'aws.sqs.tickets_generate_queue_url',
     );
   }
 
