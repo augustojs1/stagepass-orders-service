@@ -37,6 +37,7 @@ export const configuration = () => ({
   aws: {
     region: process.env.AWS_REGION,
     s3: {
+      public_url: process.env.AWS_S3_PUBLIC_URL,
       bucket: process.env.AWS_S3_BUCKET,
     },
     sqs: {
@@ -44,6 +45,9 @@ export const configuration = () => ({
       emails_queue_url: process.env.AWS_SQS_EMAIL_QUEUE_URL,
       payment_success_queue_url: process.env.AWS_SQS_PAYMENT_SUCCESS,
       payment_failed_queue_url: process.env.AWS_SQS_PAYMENT_FAILED,
+    },
+    ses: {
+      email_from: process.env.AWS_SES_EMAIL_FROM,
     },
   },
   stripe: {

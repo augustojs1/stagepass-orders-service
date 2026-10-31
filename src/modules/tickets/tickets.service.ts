@@ -100,7 +100,7 @@ export class TicketsService {
           order_id: order_id,
           code: ticketCode,
           owner_id: createdTicket.owner_id,
-          publicUrl: this.configService.get<string>('r2.public_url'),
+          publicUrl: this.configService.get<string>('aws.s3.public_url'),
         });
 
         await this.ticketsRepository.updateFileUrl(

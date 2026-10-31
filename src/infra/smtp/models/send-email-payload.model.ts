@@ -1,8 +1,11 @@
-import { Attachment } from 'nodemailer/lib/mailer';
+type SendEmailAttachment = {
+  filename: string;
+  path: string;
+};
 
-export class SendEmailPayload {
+export type SendEmailPayload = {
   to: string;
   subject: string;
   html: string;
-  attachments?: Attachment[];
-}
+  attachments?: SendEmailAttachment[];
+};

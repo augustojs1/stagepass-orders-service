@@ -1,13 +1,13 @@
 import { Module } from '@nestjs/common';
 
 import { SMTPService } from './smtp.service.interface';
-import { EtherealSMTPService } from './impl/ethereal-smtp.service';
+import { SESService } from './ses/ses.service';
 
 @Module({
   providers: [
     {
       provide: SMTPService,
-      useClass: EtherealSMTPService,
+      useClass: SESService,
     },
   ],
   exports: [SMTPService],
