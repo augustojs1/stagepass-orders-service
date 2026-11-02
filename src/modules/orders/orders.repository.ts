@@ -272,8 +272,11 @@ export class OrdersRepository {
         order_id: schema.orders.id,
         tickets_count: count(schema.order_item.id),
         order_total: schema.orders.total_price,
+
         event_name: schema.events.name,
         event_date: schema.events.starts_at,
+        event_timezone: schema.events.timezone,
+
         event_location: sql<string>`
         concat(
           ${schema.events.address_street}, ', ',
@@ -282,10 +285,12 @@ export class OrdersRepository {
           ${schema.events.address_city}
         )
       `,
+
         receipt_url: schema.payment_orders.receipt_url,
         checkout_url: schema.payment_orders.checkout_url,
         payment_status: schema.payment_orders.status,
         error_message: schema.payment_orders.error_message,
+
         current_year: sql<number>`extract(year from now())`,
       })
       .from(schema.orders)
@@ -304,12 +309,15 @@ export class OrdersRepository {
         schema.users.first_name,
         schema.orders.id,
         schema.orders.total_price,
+
         schema.events.name,
         schema.events.starts_at,
+        schema.events.timezone,
         schema.events.address_street,
         schema.events.address_number,
         schema.events.address_district,
         schema.events.address_city,
+
         schema.payment_orders.receipt_url,
         schema.payment_orders.checkout_url,
         schema.payment_orders.status,

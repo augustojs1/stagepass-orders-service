@@ -11,4 +11,5 @@ export class OrderEmailTemplateData {
   payment_status: string;
   error_message: string | null;
   current_year: number;
+  event_timezone: string;
 }

@@ -596,7 +596,7 @@ export class OrdersService {
     return {
       ...data,
       order_total: currencyFormatter(Number(data.order_total)),
-      event_date: dateFormatter(data.event_date),
+      event_date: dateFormatter(data.event_date, data.event_timezone),
     };
   }
 }
