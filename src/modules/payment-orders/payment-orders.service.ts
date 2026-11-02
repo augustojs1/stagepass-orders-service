@@ -264,11 +264,8 @@ export class PaymentOrdersService {
         provider_reference_id: checkout_session_data.provider_reference_id,
         status: 'PENDING',
         checkout_url: checkout_session_data.checkout_url,
-        checkout_url_expires_at: new Date(
-          this.dateProvider.unixToTimestampTz(
-            checkout_session_data.checkout_url_expires_at,
-            'America/Sao_Paulo',
-          ),
+        checkout_url_expires_at: this.dateProvider.unixToDate(
+          checkout_session_data.checkout_url_expires_at,
         ),
       });
     });

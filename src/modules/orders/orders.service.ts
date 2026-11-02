@@ -413,25 +413,10 @@ export class OrdersService {
       status: 'PENDING',
       provider: checkout.provider,
       checkout_url: checkout.checkout_url,
-      checkout_url_expires_at: this.toCheckoutExpiresAtString(
-        checkout.checkout_url_expires_at,
-        'America/Sao_Paulo',
-      ),
+      checkout_url_expires_at: this.dateProvider
+        .unixToDate(checkout.checkout_url_expires_at)
+        .toISOString(),
     };
-  }
-
-  private toCheckoutExpiresAtDate(
-    unixSeconds: number,
-    tz = 'America/Sao_Paulo',
-  ): Date {
-    return new Date(this.dateProvider.unixToTimestampTz(unixSeconds, tz));
-  }
-
-  private toCheckoutExpiresAtString(
-    unixSeconds: number,
-    tz = 'America/Sao_Paulo',
-  ): string {
-    return this.dateProvider.unixToTimestampTz(unixSeconds, tz);
   }
 
   async payOrder(
@@ -453,7 +438,8 @@ export class OrdersService {
           receipt_url: paymentOrder.receipt_url,
           provider: paymentOrder.provider as PaymentProviders,
           checkout_url: null,
-          checkout_url_expires_at: String(paymentOrder.checkout_url_expires_at),
+          checkout_url_expires_at:
+            paymentOrder.checkout_url_expires_at?.toISOString() ?? null,
         };
       }
 
@@ -497,9 +483,8 @@ export class OrdersService {
           provider_reference_id: checkoutData.provider_reference_id,
           status: 'PENDING',
           checkout_url: checkoutData.checkout_url,
-          checkout_url_expires_at: this.toCheckoutExpiresAtDate(
+          checkout_url_expires_at: this.dateProvider.unixToDate(
             checkoutData.checkout_url_expires_at,
-            'America/Sao_Paulo',
           ),
         });
 
@@ -550,9 +535,8 @@ export class OrdersService {
           provider_reference_id: checkoutData.provider_reference_id,
           status: 'PENDING',
           checkout_url: checkoutData.checkout_url,
-          checkout_url_expires_at: this.toCheckoutExpiresAtDate(
+          checkout_url_expires_at: this.dateProvider.unixToDate(
             checkoutData.checkout_url_expires_at,
-            'America/Sao_Paulo',
           ),
         });
 
