@@ -252,15 +252,16 @@ export class OrdersRepository {
   }
 
   async findOrderUserEmail(order_id: string): Promise<string | null> {
-    const result = await this.drizzle
+    const [result] = await this.drizzle
       .select({
         email: schema.users.email,
       })
       .from(schema.orders)
       .innerJoin(schema.users, eq(schema.orders.user_id, schema.users.id))
-      .where(eq(schema.orders.id, order_id));
+      .where(eq(schema.orders.id, order_id))
+      .limit(1);
 
-    return result[0].email ?? null;
+    return result?.email ?? null;
   }
 
   async findOrderEmailTemplateDataById(

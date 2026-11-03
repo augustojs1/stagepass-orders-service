@@ -3,9 +3,10 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
+  NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { inArray, eq } from 'drizzle-orm';
+import { inArray, eq, and } from 'drizzle-orm';
 import { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import * as schemas from '@/infra/database/orm/drizzle/schemas';
@@ -158,35 +159,123 @@ export class PaymentOrdersService {
 
   async handleFailedPaymentOrder(payload: PaymentFailedPayload): Promise<void> {
     try {
-      await this.drizzle.transaction(async (trx) => {
-        await this.paymentOrdersRepository.updateByProviderReferenceIdTrx(trx, {
-          provider_reference_id: payload.provider_reference_id,
-          status: 'FAILED',
-          error_code: payload.error_code,
-          error_message: payload.error_message,
-        });
+      const shouldNotify = await this.drizzle.transaction(
+        async (trx): Promise<boolean> => {
+          const [order] = await trx
+            .select()
+            .from(schemas.orders)
+            .where(eq(schemas.orders.id, payload.order_id))
+            .for('update');
 
-        await this.paymentGatewayWebhookEventsRepository.updateByProviderReferenceIdTrx(
-          trx,
-          {
-            process: 'PROCESSED',
-            provider_reference_id: payload.provider_reference_id,
-            receipt_url: null,
-            error_code: payload.error_code,
-            error_message: payload.error_message,
-            error_decline_code: payload.error_decline_code,
-          },
-        );
-      });
+          if (!order) {
+            throw new NotFoundException(
+              `Order order_id=${payload.order_id} not found`,
+            );
+          }
+
+          const [paymentOrder] = await trx
+            .select()
+            .from(schemas.payment_orders)
+            .where(
+              and(
+                eq(
+                  schemas.payment_orders.provider_reference_id,
+                  payload.provider_reference_id,
+                ),
+                eq(schemas.payment_orders.order_id, payload.order_id),
+              ),
+            )
+            .for('update');
+
+          if (!paymentOrder) {
+            throw new NotFoundException(
+              `Payment provider_reference_id=${payload.provider_reference_id} not found for order_id=${payload.order_id}`,
+            );
+          }
+
+          // Idempotência: a falha já foi registrada.
+          if (paymentOrder.status === 'FAILED') {
+            this.logger.log(
+              `Payment already failed. provider_reference_id=${payload.provider_reference_id}`,
+            );
+
+            return false;
+          }
+
+          if (paymentOrder.status === 'SUCCEEDED') {
+            this.logger.warn(
+              `Ignoring payment failure for succeeded payment. provider_reference_id=${payload.provider_reference_id}`,
+            );
+
+            return false;
+          }
+
+          if (paymentOrder.status === 'CANCELLED') {
+            this.logger.warn(
+              `Ignoring payment failure for cancelled payment. provider_reference_id=${payload.provider_reference_id}`,
+            );
+
+            return false;
+          }
+
+          if (paymentOrder.status !== 'PENDING') {
+            throw new UnprocessableEntityException(
+              `Invalid payment status transition: ${paymentOrder.status} -> FAILED`,
+            );
+          }
+
+          await this.paymentOrdersRepository.updateByProviderReferenceIdTrx(
+            trx,
+            {
+              provider_reference_id: payload.provider_reference_id,
+              status: 'FAILED',
+              error_code: payload.error_code,
+              error_message: payload.error_message,
+              updated_at: new Date(),
+            },
+          );
+
+          await this.paymentGatewayWebhookEventsRepository.updateByProviderReferenceIdTrx(
+            trx,
+            {
+              provider_reference_id: payload.provider_reference_id,
+              process: 'PROCESSED',
+              receipt_url: null,
+              error_code: payload.error_code,
+              error_message: payload.error_message,
+              error_decline_code: payload.error_decline_code,
+            },
+          );
+
+          this.logger.log(
+            `Successfully updated payment to FAILED. order_id=${payload.order_id}, provider_reference_id=${payload.provider_reference_id}`,
+          );
+
+          if (
+            order.status === 'PAID' ||
+            order.status === 'CANCELLED' ||
+            order.status === 'EXPIRED'
+          ) {
+            this.logger.log(
+              `Skipping payment failure notification for order_id=${payload.order_id} with status=${order.status}`,
+            );
+
+            return false;
+          }
+
+          return true;
+        },
+      );
+
+      if (!shouldNotify) {
+        return;
+      }
 
       const email = await this.orderRepository.findOrderUserEmail(
         payload.order_id,
       );
 
       if (!email) {
-        this.logger.error(
-          `Order user email not found for order_id=${payload.order_id}`,
-        );
         throw new InternalServerErrorException(
           `Order user email not found for order_id=${payload.order_id}`,
         );
@@ -197,12 +286,16 @@ export class PaymentOrdersService {
         to: email,
         order_id: payload.order_id,
       });
+
+      this.logger.log(
+        `Successfully published payment failure notification for order_id=${payload.order_id}`,
+      );
     } catch (error) {
-      const e = error as Error;
+      const err = error as Error;
 
       this.logger.error(
-        `Failed updated payment_order for order=${payload.order_id}`,
-        e?.stack,
+        `Failed to process payment failure for order_id=${payload.order_id}, provider_reference_id=${payload.provider_reference_id}`,
+        err.stack,
       );
 
       throw error;
