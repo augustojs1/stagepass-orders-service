@@ -1,4 +1,5 @@
 import {
+  ConflictException,
   Inject,
   Injectable,
   InternalServerErrorException,
@@ -46,96 +47,181 @@ export class PaymentOrdersService {
     payload: SuccessPaymentEventPayload,
   ): Promise<void> {
     try {
-      await this.drizzle.transaction(async (trx) => {
-        const order = await this.orderRepository.findByIdTrx(
-          trx,
-          payload.order_id,
-        );
+      const paymentUpdated = await this.drizzle.transaction(
+        async (trx): Promise<boolean> => {
+          const [order] = await trx
+            .select()
+            .from(schemas.orders)
+            .where(eq(schemas.orders.id, payload.order_id))
+            .for('update');
 
-        if (order.status === 'PAID') {
-          this.logger.log(`Order order=${payload.order_id} is already paid!`);
-          return;
-        }
-
-        await this.paymentOrdersRepository.updateByProviderReferenceIdTrx(trx, {
-          provider_reference_id: payload.provider_reference_id,
-          receipt_url: payload.receipt_url,
-          status: 'SUCCEEDED',
-        });
-
-        await this.orderRepository.updateByProviderReferenceIdTrx(trx, {
-          id: payload.order_id,
-          status: 'PAID',
-        });
-
-        await this.eventTicketReservationRepository.updateActiveReservationsByOrderIdTrx(
-          trx,
-          {
-            order_id: payload.order_id,
-            active: false,
-          },
-        );
-
-        const eventTicketsOrder =
-          await this.orderRepository.getTicketsByOrderId(trx, payload.order_id);
-
-        const eventTicketAmmountToBuy = new Map<string, number>();
-
-        for (const ticket of eventTicketsOrder) {
-          if (!ticket.ticket_id) continue;
-
-          const amount =
-            (eventTicketAmmountToBuy.get(ticket.ticket_id) ?? 0) + 1;
-
-          eventTicketAmmountToBuy.set(ticket.ticket_id, amount);
-        }
-
-        const eventTicketIds = [...eventTicketAmmountToBuy.keys()];
-
-        const eventTickets = await trx
-          .select()
-          .from(schemas.event_tickets)
-          .where(inArray(schemas.event_tickets.id, eventTicketIds))
-          .for('update');
-
-        for (const ticket of eventTickets) {
-          if (eventTicketAmmountToBuy.get(ticket.id) > ticket.amount) {
-            this.logger.error(
-              `Failed to process order=${payload.order_id} with ${payload.provider_reference_id} provider reference Id:: Amount of ${eventTicketAmmountToBuy.get(ticket.id)} of event_ticket_id=${ticket.id} is bigger than the ${ticket.amount} amount of tickets!`,
-            );
-
-            throw new UnprocessableEntityException(
-              `Amount of ${eventTicketAmmountToBuy.get(ticket.id)} of event_ticket_id=${ticket.id} is bigger than the ${ticket.amount} amount of tickets!`,
+          if (!order) {
+            throw new NotFoundException(
+              `Order order_id=${payload.order_id} not found`,
             );
           }
 
-          const updatedAmmount =
-            ticket.amount - eventTicketAmmountToBuy.get(ticket.id);
+          const [paymentOrder] = await trx
+            .select()
+            .from(schemas.payment_orders)
+            .where(
+              and(
+                eq(
+                  schemas.payment_orders.provider_reference_id,
+                  payload.provider_reference_id,
+                ),
+                eq(schemas.payment_orders.order_id, payload.order_id),
+                eq(schemas.payment_orders.provider, 'STRIPE'),
+              ),
+            )
+            .for('update');
 
-          await this.eventTicketsRepository.updateTrx(trx, {
-            id: ticket.id,
-            amount: updatedAmmount,
+          if (!paymentOrder) {
+            throw new NotFoundException(
+              `Payment provider_reference_id=${payload.provider_reference_id} not found for order_id=${payload.order_id}`,
+            );
+          }
+
+          if (order.status === 'PAID') {
+            if (paymentOrder.status !== 'SUCCEEDED') {
+              throw new ConflictException(
+                `Order order_id=${payload.order_id} is already paid, but payment provider_reference_id=${payload.provider_reference_id} is not the successful payment`,
+              );
+            }
+
+            this.logger.log(`Order order_id=${payload.order_id} already paid.`);
+
+            return false;
+          }
+
+          if (order.status !== 'AWAITING_PAYMENT') {
+            throw new ConflictException(
+              `Cannot confirm payment for order_id=${payload.order_id} with status=${order.status}`,
+            );
+          }
+
+          if (paymentOrder.status === 'CANCELLED') {
+            throw new ConflictException(
+              `Payment provider_reference_id=${payload.provider_reference_id} is cancelled`,
+            );
+          }
+
+          const eventTicketsOrder =
+            await this.orderRepository.getTicketsByOrderId(
+              trx,
+              payload.order_id,
+            );
+
+          if (!eventTicketsOrder.length) {
+            throw new UnprocessableEntityException(
+              `No order items found for order_id=${payload.order_id}`,
+            );
+          }
+
+          const eventTicketAmountToBuy = new Map<string, number>();
+
+          for (const ticket of eventTicketsOrder) {
+            if (!ticket.ticket_id) {
+              throw new UnprocessableEntityException(
+                `Invalid event ticket associated with order_id=${payload.order_id}`,
+              );
+            }
+
+            const amount =
+              (eventTicketAmountToBuy.get(ticket.ticket_id) ?? 0) + 1;
+
+            eventTicketAmountToBuy.set(ticket.ticket_id, amount);
+          }
+
+          const eventTicketIds = [...eventTicketAmountToBuy.keys()];
+
+          const eventTickets = await trx
+            .select()
+            .from(schemas.event_tickets)
+            .where(inArray(schemas.event_tickets.id, eventTicketIds))
+            .orderBy(schemas.event_tickets.id)
+            .for('update');
+
+          if (eventTickets.length !== eventTicketIds.length) {
+            throw new NotFoundException(
+              `Some event tickets were not found for order_id=${payload.order_id}`,
+            );
+          }
+
+          for (const ticket of eventTickets) {
+            const amountToBuy = eventTicketAmountToBuy.get(ticket.id) ?? 0;
+
+            if (amountToBuy > ticket.amount) {
+              throw new UnprocessableEntityException(
+                `Insufficient tickets for event_ticket_id=${ticket.id}. Available=${ticket.amount}, requested=${amountToBuy}`,
+              );
+            }
+          }
+
+          for (const ticket of eventTickets) {
+            const amountToBuy = eventTicketAmountToBuy.get(ticket.id) ?? 0;
+
+            const updatedAmount = ticket.amount - amountToBuy;
+
+            await this.eventTicketsRepository.updateTrx(trx, {
+              id: ticket.id,
+              amount: updatedAmount,
+            });
+          }
+
+          await trx
+            .update(schemas.payment_orders)
+            .set({
+              status: 'SUCCEEDED',
+              receipt_url: payload.receipt_url,
+              error_code: null,
+              error_message: null,
+              updated_at: new Date(),
+            })
+            .where(eq(schemas.payment_orders.id, paymentOrder.id));
+
+          await this.orderRepository.updateByProviderReferenceIdTrx(trx, {
+            id: payload.order_id,
+            status: 'PAID',
           });
-        }
 
-        await this.paymentGatewayWebhookEventsRepository.updateByProviderReferenceIdTrx(
-          trx,
-          {
-            process: 'PROCESSED',
-            provider_reference_id: payload.provider_reference_id,
-            receipt_url: payload.receipt_url,
-          },
-        );
-      });
+          await this.eventTicketReservationRepository.updateActiveReservationsByOrderIdTrx(
+            trx,
+            {
+              order_id: payload.order_id,
+              active: false,
+            },
+          );
+
+          await this.paymentGatewayWebhookEventsRepository.updateByProviderReferenceIdTrx(
+            trx,
+            {
+              process: 'PROCESSED',
+              provider_reference_id: payload.provider_reference_id,
+              receipt_url: payload.receipt_url,
+              error_code: null,
+              error_message: null,
+              error_decline_code: null,
+            },
+          );
+
+          this.logger.log(
+            `Successfully confirmed payment for order_id=${payload.order_id}, provider_reference_id=${payload.provider_reference_id}`,
+          );
+
+          return true;
+        },
+      );
+
+      if (!paymentUpdated) {
+        return;
+      }
 
       const email = await this.orderRepository.findOrderUserEmail(
         payload.order_id,
       );
 
       if (!email) {
-        this.logger.error(
-          `Order user email not found for order_id=${payload.order_id}`,
-        );
         throw new InternalServerErrorException(
           `Order user email not found for order_id=${payload.order_id}`,
         );
@@ -146,13 +232,18 @@ export class PaymentOrdersService {
         to: email,
         order_id: payload.order_id,
       });
-    } catch (error) {
-      const e = error as Error;
 
       this.logger.log(
-        `Failed to process success payment for order_id=${payload.order_id}`,
-        e?.stack,
+        `Successfully published payment success notification for order_id=${payload.order_id}`,
       );
+    } catch (error) {
+      const err = error as Error;
+
+      this.logger.error(
+        `Failed to process successful payment for order_id=${payload.order_id}, provider_reference_id=${payload.provider_reference_id}`,
+        err.stack,
+      );
+
       throw error;
     }
   }
