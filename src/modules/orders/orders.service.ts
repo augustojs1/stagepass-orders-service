@@ -11,7 +11,7 @@ import {
   ConflictException,
 } from '@nestjs/common';
 import { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-import { and, count, eq, inArray } from 'drizzle-orm';
+import { and, count, eq, inArray, gt } from 'drizzle-orm';
 
 import { OrdersRepository } from './orders.repository';
 import { OrderEmailTemplateData } from '../emails/models';
@@ -242,30 +242,30 @@ export class OrdersService {
     order_id: string,
   ): Promise<CreateOrderResponseDto> {
     try {
-      const order = await this.findOneElseThrow(order_id);
-
-      if (order.status !== 'PENDING') {
-        this.logger.error(
-          'Orders can only be confirmed when order status is PENDING',
-        );
-        throw new UnprocessableEntityException(
-          'Orders can only be confirmed when order status is PENDING',
-        );
-      }
-
-      if (user_id !== order.user_id) {
-        this.logger.error(`User ${user_id} does not own order ${order.id}`);
-        throw new ForbiddenException(`User does not own order!`);
-      }
-
-      const result = await this.drizzle.transaction(async (tx) => {
-        const order = await tx
+      const updatedOrder = await this.drizzle.transaction(async (trx) => {
+        const [order] = await trx
           .select()
           .from(schema.orders)
           .where(eq(schema.orders.id, order_id))
           .for('update');
 
-        const orderItems = await tx
+        if (!order) {
+          throw new NotFoundException(`Order order_id=${order_id} not found!`);
+        }
+
+        if (order.user_id !== user_id) {
+          throw new ForbiddenException(
+            `User does not own order_id=${order_id}!`,
+          );
+        }
+
+        if (order.status !== 'PENDING') {
+          throw new UnprocessableEntityException(
+            `Order order_id=${order_id} cannot be confirmed with status=${order.status}`,
+          );
+        }
+
+        const orderItems = await trx
           .select({
             id: schema.order_item.id,
             event_ticket_id: schema.order_item.event_ticket_id,
@@ -274,40 +274,55 @@ export class OrdersService {
           .from(schema.order_item)
           .where(eq(schema.order_item.order_id, order_id));
 
-        if (orderItems.length === 0) {
+        if (!orderItems.length) {
           throw new UnprocessableEntityException(
-            'Order must contain at least one item',
+            `Order order_id=${order_id} must contain at least one item!`,
           );
         }
 
-        const eventTicketAmmountToBuy = new Map<string, number>();
+        const eventTicketAmountToBuy = new Map<string, number>();
 
         for (const item of orderItems) {
-          if (!item.event_ticket_id) continue;
+          if (!item.event_ticket_id) {
+            throw new UnprocessableEntityException(
+              `Order item ${item.id} has no event_ticket_id!`,
+            );
+          }
 
-          const amount =
-            (eventTicketAmmountToBuy.get(item.event_ticket_id) ?? 0) + 1;
+          const currentAmount =
+            eventTicketAmountToBuy.get(item.event_ticket_id) ?? 0;
 
-          eventTicketAmmountToBuy.set(item.event_ticket_id, amount);
+          eventTicketAmountToBuy.set(item.event_ticket_id, currentAmount + 1);
         }
 
-        const eventTicketIds = [...eventTicketAmmountToBuy.keys()];
+        const eventTicketIds = [...eventTicketAmountToBuy.keys()];
 
-        const eventTickets = await tx
+        const eventTickets = await trx
           .select()
           .from(schema.event_tickets)
           .where(inArray(schema.event_tickets.id, eventTicketIds))
+          .orderBy(schema.event_tickets.id)
           .for('update');
 
-        const ticketsReserved = await tx
+        if (eventTickets.length !== eventTicketIds.length) {
+          throw new NotFoundException(
+            `Some event tickets were not found for order_id=${order_id}`,
+          );
+        }
+
+        const now = new Date();
+
+        const ticketsReserved = await trx
           .select({
             event_ticket_id: schema.event_ticket_reservations.event_ticket_id,
+
             reserved: count(schema.event_ticket_reservations.event_ticket_id),
           })
           .from(schema.event_ticket_reservations)
           .where(
             and(
               eq(schema.event_ticket_reservations.active, true),
+              gt(schema.event_ticket_reservations.expires_at, now),
               inArray(
                 schema.event_ticket_reservations.event_ticket_id,
                 eventTicketIds,
@@ -321,21 +336,27 @@ export class OrdersService {
         for (const reservation of ticketsReserved) {
           ticketsReservedMap.set(
             reservation.event_ticket_id,
-            reservation.reserved,
+            Number(reservation.reserved),
           );
         }
 
         for (const ticket of eventTickets) {
-          const ammountToBuy = eventTicketAmmountToBuy.get(ticket.id);
-          const availableAmmount =
-            ticket.amount - ticketsReservedMap.get(ticket.id);
+          const amountToBuy = eventTicketAmountToBuy.get(ticket.id) ?? 0;
 
-          if (ammountToBuy > availableAmmount) {
-            this.logger.error(
-              `Tickets not available for order=${order[0].id}, user_id=${user_id}, ${ticket.id}`,
+          const reservedAmount = ticketsReservedMap.get(ticket.id) ?? 0;
+
+          const availableAmount = ticket.amount - reservedAmount;
+
+          if (amountToBuy > availableAmount) {
+            this.logger.warn(
+              `Insufficient tickets for event_ticket_id=${ticket.id}. ` +
+                `Available=${availableAmount}, ` +
+                `Requested=${amountToBuy}, ` +
+                `Reserved=${reservedAmount}`,
             );
+
             throw new ConflictException(
-              `Amount of ${ammountToBuy} not available for ticket ${ticket.id}`,
+              `Not enough tickets available for event_ticket_id=${ticket.id}`,
             );
           }
         }
@@ -344,42 +365,49 @@ export class OrdersService {
           Date.now() + this.RESERVATION_EXPIRES_AT_IN_MIN,
         );
 
-        const reservations = orderItems.map((item) => {
-          return {
-            order_id: order[0].id,
-            order_item_id: item.id,
-            event_ticket_id: item.event_ticket_id,
-            expires_at: expiresAt,
-            active: true,
-          };
-        });
+        const reservations = orderItems.map((item) => ({
+          order_id: order.id,
+          order_item_id: item.id,
+          event_ticket_id: item.event_ticket_id!,
+          expires_at: expiresAt,
+          active: true,
+        }));
 
-        await tx.insert(schema.event_ticket_reservations).values(reservations);
+        await trx.insert(schema.event_ticket_reservations).values(reservations);
 
-        const totalPrice = orderItems.reduce((acc, item) => {
-          return acc + item.unit_price;
-        }, 0);
+        const totalPrice = orderItems.reduce(
+          (total, item) => total + Number(item.unit_price),
+          0,
+        );
 
-        const updatedOrder = await tx
+        const [confirmedOrder] = await trx
           .update(schema.orders)
           .set({
             reservation_expires_at: expiresAt,
             status: 'AWAITING_PAYMENT',
             total_price: totalPrice,
+            updated_at: new Date(),
           })
           .where(eq(schema.orders.id, order_id))
           .returning();
 
-        return updatedOrder[0];
+        this.logger.log(
+          `Successfully confirmed order_id=${order_id}. ` +
+            `Reserved ${orderItems.length} tickets.`,
+        );
+
+        return confirmedOrder;
       });
 
-      return result;
+      return this.ordersMapper.mapOrderEntityToCreateOrderReponseDto(
+        updatedOrder,
+      );
     } catch (error) {
-      const e = error as Error;
+      const err = error as Error;
 
       this.logger.error(
         `Failed to confirm order user_id=${user_id}, order_id=${order_id}`,
-        e?.stack,
+        err.stack,
       );
 
       if (error instanceof HttpException) {
