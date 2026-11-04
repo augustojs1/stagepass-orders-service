@@ -2,6 +2,6 @@ import { FailedPaymentEventPayload } from '@/infra/payment-gateway/models/failed
 import { SuccessPaymentEventPayload } from '@/infra/payment-gateway/models/success-payment-event-payload.model';
 
 export abstract class IPaymentMessageProducer {
-  abstract emitSuccess(payload: SuccessPaymentEventPayload): void;
-  abstract emitFailed(payload: FailedPaymentEventPayload): void;
+  abstract emitSuccess(payload: SuccessPaymentEventPayload): Promise<void>;
+  abstract emitFailed(payload: FailedPaymentEventPayload): Promise<void>;
 }

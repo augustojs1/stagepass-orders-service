@@ -173,7 +173,7 @@ export class StripeService implements IPaymentGateway {
         `Successfully saved PAID payment_gateway_webhook_event for order_id=${orderId}, provider_reference_id=${session.id}`,
       );
 
-      this.paymentMessageProducer.emitSuccess({
+      await this.paymentMessageProducer.emitSuccess({
         order_id: orderId,
         provider_reference_id: session.id,
         receipt_url: charges.data[0].receipt_url,
@@ -184,37 +184,38 @@ export class StripeService implements IPaymentGateway {
   async handleFailedEvent(
     event: Stripe.PaymentIntentPaymentFailedEvent,
   ): Promise<void> {
-    const session = event.data.object;
-    const intent = await this.stripeClient.paymentIntents.retrieve(session.id);
+    const paymentIntent = event.data.object;
 
-    const orderId = session['metadata']?.orderId;
+    try {
+      const orderId = paymentIntent.metadata?.orderId;
 
-    await this.paymentGatewayWebhookEventsRepository.insert({
-      order_id: orderId,
-      provider_reference_id: intent.payment_details.order_reference,
-      provider: 'STRIPE',
-      process: 'PROCESSING',
-      amount_total: session.amount,
-      payment_status: 'FAILED',
-      currency: session.currency,
-      event_created_at: session.created,
-      expires_at: null,
-      receipt_url: null,
-      error_code: intent.last_payment_error.code,
-      error_decline_code: intent.last_payment_error.decline_code,
-      error_message: intent.last_payment_error.message,
-    });
+      const paymentError = paymentIntent.last_payment_error;
 
-    this.logger.log(
-      `Successfully saved FAILED payment_gateway_webhook_event for order_id=${orderId}, provider_reference_id=${session.id}`,
-    );
+      this.logger.warn(
+        `Stripe payment attempt failed. ` +
+          `event_id=${event.id}, ` +
+          `order_id=${orderId ?? 'unknown'}, ` +
+          `payment_intent_id=${paymentIntent.id}, ` +
+          `status=${paymentIntent.status}, ` +
+          `error_code=${paymentError?.code ?? 'unknown'}, ` +
+          `decline_code=${paymentError?.decline_code ?? 'unknown'}, ` +
+          `error_message=${paymentError?.message ?? 'unknown'}`,
+      );
 
-    this.paymentMessageProducer.emitFailed({
-      order_id: orderId,
-      provider_reference_id: intent.payment_details.order_reference,
-      error_code: intent.last_payment_error.code,
-      error_decline_code: intent.last_payment_error.decline_code,
-      error_message: intent.last_payment_error.message,
-    });
+      this.logger.log(
+        `Payment failure event processed without closing checkout. ` +
+          `order_id=${orderId ?? 'unknown'}, ` +
+          `payment_intent_id=${paymentIntent.id}`,
+      );
+    } catch (error) {
+      const err = error as Error;
+
+      this.logger.error(
+        `Failed to handle Stripe payment failure event_id=${event.id}`,
+        err.stack,
+      );
+
+      throw error;
+    }
   }
 }
