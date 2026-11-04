@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -93,9 +94,14 @@ export class SESService implements SMTPService {
           );
         }
 
-        const declaredSize = Number(response.headers.get('content-length'));
+        const contentLengthHeader = response.headers.get('content-length');
+
+        const declaredSize = contentLengthHeader
+          ? Number(contentLengthHeader)
+          : null;
 
         if (
+          declaredSize !== null &&
           Number.isFinite(declaredSize) &&
           declaredSize > this.MAX_ATTACHMENT_SIZE
         ) {
@@ -106,17 +112,19 @@ export class SESService implements SMTPService {
           );
         }
 
-        const chunks: Uint8Array[] = [];
-        let totalSize = 0;
-
         if (!response.body) {
           throw new Error(
             `Empty response body for attachment: ${attachment.filename}`,
           );
         }
 
+        const chunks: Buffer[] = [];
+        let totalSize = 0;
+
         for await (const chunk of response.body) {
-          totalSize += chunk.byteLength;
+          const buffer = Buffer.from(chunk);
+
+          totalSize += buffer.length;
 
           if (totalSize > this.MAX_ATTACHMENT_SIZE) {
             await response.body.cancel().catch(() => undefined);
@@ -126,22 +134,44 @@ export class SESService implements SMTPService {
             );
           }
 
-          chunks.push(chunk);
+          chunks.push(buffer);
         }
 
         const content = Buffer.concat(chunks, totalSize);
 
+        this.validatePdf(content, attachment.filename);
+
+        const checksum = createHash('sha256').update(content).digest('hex');
+
         this.logger.debug(
-          `Successfully downloaded attachment: ${attachment.filename}`,
+          `Attachment downloaded successfully: ` +
+            `filename=${attachment.filename}, ` +
+            `size=${content.length}, ` +
+            `sha256=${checksum}`,
         );
 
         return {
           FileName: attachment.filename,
           ContentType: 'application/pdf',
           ContentDisposition: 'ATTACHMENT',
+          ContentTransferEncoding: 'BASE64',
           RawContent: content,
         };
       }),
     );
+  }
+
+  private validatePdf(content: Buffer, filename: string): void {
+    if (content.length === 0) {
+      throw new Error(`Empty PDF attachment: ${filename}`);
+    }
+
+    const signature = content.subarray(0, 5).toString('ascii');
+
+    if (signature !== '%PDF-') {
+      throw new Error(`Invalid PDF signature: filename=${filename}`);
+    }
+
+    this.logger.debug(`PDF validation successful: filename=${filename}`);
   }
 }
