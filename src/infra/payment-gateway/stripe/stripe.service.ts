@@ -14,9 +14,10 @@ import { PaymentGatewayWebhookEventsRepository } from '../../payment-gateway/pay
 
 @Injectable()
 export class StripeService implements IPaymentGateway {
-  private readonly logger: Logger = new Logger(StripeService.name);
+  private readonly logger = new Logger(StripeService.name);
 
   private readonly stripeClient: Stripe;
+  private readonly appHost: string;
 
   constructor(
     private readonly configService: ConfigService,
@@ -24,13 +25,15 @@ export class StripeService implements IPaymentGateway {
     private readonly paymentGatewayWebhookEventsRepository: PaymentGatewayWebhookEventsRepository,
   ) {
     this.stripeClient = new Stripe(
-      this.configService.get<string>('stripe.secret_key'),
+      this.configService.getOrThrow<string>('stripe.secret_key'),
       {
         apiVersion: '2026-01-28.clover',
       },
     );
 
-    this.logger.log('Succesfully init Stripe Client');
+    this.appHost = this.configService.getOrThrow<string>('app_host');
+
+    this.logger.log('Successfully initialized Stripe Client');
   }
 
   public async process(
@@ -65,12 +68,8 @@ export class StripeService implements IPaymentGateway {
             },
           ],
           mode: 'payment',
-          success_url:
-            `https://stagepass.augustojsdev.com.br/payment/success` +
-            `?orderId=${data.order_id}`,
-          cancel_url:
-            `https://stagepass.augustojsdev.com.br/payment/failed` +
-            `?orderId=${data.order_id}`,
+          success_url: `${this.appHost}` + `?orderId=${data.order_id}`,
+          cancel_url: `${this.appHost}` + `?orderId=${data.order_id}`,
           client_reference_id: data.order_id,
           metadata: {
             orderId: data.order_id,
@@ -114,28 +113,57 @@ export class StripeService implements IPaymentGateway {
     }
   }
 
-  async handleEvent(body: any, sig: string | string[]): Promise<void> {
+  async handleEvent(
+    body: Buffer | string,
+    sig: string | string[],
+  ): Promise<void> {
     try {
+      const signature = Array.isArray(sig) ? sig[0] : sig;
+
+      if (!signature) {
+        throw new Error('Stripe webhook signature is missing');
+      }
+
       const event = this.stripeClient.webhooks.constructEvent(
         body,
-        sig,
-        this.configService.get<string>('stripe.webhook_key'),
+        signature,
+        this.configService.getOrThrow<string>('stripe.webhook_key'),
       );
 
-      if (event.type === 'checkout.session.completed') {
-        await this.handleSuccessEvent(event);
+      this.logger.log(
+        `Received Stripe webhook event_id=${event.id}, type=${event.type}`,
+      );
+
+      switch (event.type) {
+        case 'checkout.session.completed':
+          await this.handleSuccessEvent(event);
+          break;
+
+        case 'checkout.session.expired':
+          await this.handleExpiredEvent(event);
+          break;
+
+        case 'payment_intent.payment_failed':
+          await this.handleFailedEvent(event);
+          break;
+
+        default:
+          this.logger.debug(
+            `Ignoring unsupported Stripe event type=${event.type}`,
+          );
+          break;
       }
 
-      if (event.type === 'payment_intent.payment_failed') {
-        await this.handleFailedEvent(event);
-      }
+      this.logger.log(
+        `Successfully handled Stripe webhook event_id=${event.id}, type=${event.type}`,
+      );
     } catch (error) {
-      const e = error as Error;
+      const err = error as Error;
 
-      this.logger.error(`Failed to process Stripe webhook!`, e?.stack);
+      this.logger.error('Failed to process Stripe webhook', err.stack);
 
       throw new InternalServerErrorException(
-        'Failed to process Stripe webhook!',
+        'Failed to process Stripe webhook',
       );
     }
   }
@@ -146,39 +174,72 @@ export class StripeService implements IPaymentGateway {
     const session = event.data.object;
 
     const orderId = session.metadata?.orderId;
-    const status = session.payment_status;
+    const paymentStatus = session.payment_status;
 
-    if (status === 'paid') {
-      const charges = await this.stripeClient.charges.list({
-        payment_intent: String(session.payment_intent),
-      });
+    if (!orderId) {
+      throw new Error(`Missing orderId metadata for session_id=${session.id}`);
+    }
 
-      await this.paymentGatewayWebhookEventsRepository.insert({
-        order_id: orderId,
-        provider_reference_id: session.id,
-        provider: 'STRIPE',
-        process: 'PROCESSING',
-        amount_total: session.amount_total,
-        payment_status: 'PAID',
-        currency: session.currency,
-        event_created_at: session.created,
-        expires_at: session.expires_at,
-        receipt_url: charges.data[0].receipt_url,
-        error_code: null,
-        error_decline_code: null,
-        error_message: null,
-      });
-
-      this.logger.log(
-        `Successfully saved PAID payment_gateway_webhook_event for order_id=${orderId}, provider_reference_id=${session.id}`,
+    if (paymentStatus !== 'paid') {
+      this.logger.warn(
+        `Checkout completed without confirmed payment. ` +
+          `order_id=${orderId}, ` +
+          `session_id=${session.id}, ` +
+          `payment_status=${paymentStatus}`,
       );
 
-      await this.paymentMessageProducer.emitSuccess({
-        order_id: orderId,
-        provider_reference_id: session.id,
-        receipt_url: charges.data[0].receipt_url,
-      });
+      return;
     }
+
+    const paymentIntentId =
+      typeof session.payment_intent === 'string'
+        ? session.payment_intent
+        : session.payment_intent?.id;
+
+    if (!paymentIntentId) {
+      throw new Error(`PaymentIntent not found for session_id=${session.id}`);
+    }
+
+    const charges = await this.stripeClient.charges.list({
+      payment_intent: paymentIntentId,
+      limit: 1,
+    });
+
+    const receiptUrl = charges.data[0]?.receipt_url ?? null;
+
+    await this.paymentGatewayWebhookEventsRepository.insert({
+      order_id: orderId,
+      provider_reference_id: session.id,
+      provider: 'STRIPE',
+      process: 'PROCESSING',
+      amount_total: session.amount_total,
+      payment_status: 'PAID',
+      currency: session.currency ?? 'usd',
+      event_created_at: event.created,
+      expires_at: session.expires_at,
+      receipt_url: receiptUrl,
+      error_code: null,
+      error_decline_code: null,
+      error_message: null,
+    });
+
+    this.logger.log(
+      `Successfully saved PAID webhook event for ` +
+        `order_id=${orderId}, ` +
+        `provider_reference_id=${session.id}`,
+    );
+
+    await this.paymentMessageProducer.emitSuccess({
+      order_id: orderId,
+      provider_reference_id: session.id,
+      receipt_url: receiptUrl,
+    });
+
+    this.logger.log(
+      `Successfully published payment success message for ` +
+        `order_id=${orderId}, ` +
+        `provider_reference_id=${session.id}`,
+    );
   }
 
   async handleFailedEvent(
@@ -186,32 +247,103 @@ export class StripeService implements IPaymentGateway {
   ): Promise<void> {
     const paymentIntent = event.data.object;
 
+    const orderId = paymentIntent.metadata?.orderId;
+    const paymentError = paymentIntent.last_payment_error;
+
+    this.logger.warn(
+      `Stripe payment attempt failed. ` +
+        `event_id=${event.id}, ` +
+        `order_id=${orderId ?? 'unknown'}, ` +
+        `payment_intent_id=${paymentIntent.id}, ` +
+        `status=${paymentIntent.status}, ` +
+        `error_code=${paymentError?.code ?? 'unknown'}, ` +
+        `decline_code=${paymentError?.decline_code ?? 'unknown'}, ` +
+        `error_message=${paymentError?.message ?? 'unknown'}`,
+    );
+  }
+
+  async handleExpiredEvent(
+    event: Stripe.CheckoutSessionExpiredEvent,
+  ): Promise<void> {
+    const session = event.data.object;
+
+    const orderId = session.metadata?.orderId ?? session.client_reference_id;
+
+    const providerReferenceId = session.id;
+
     try {
-      const orderId = paymentIntent.metadata?.orderId;
+      if (!orderId) {
+        throw new Error(
+          `Missing orderId for expired checkout session_id=${providerReferenceId}`,
+        );
+      }
 
-      const paymentError = paymentIntent.last_payment_error;
+      if (session.status !== 'expired') {
+        throw new Error(
+          `Invalid checkout session status=${session.status} for session_id=${providerReferenceId}`,
+        );
+      }
 
-      this.logger.warn(
-        `Stripe payment attempt failed. ` +
-          `event_id=${event.id}, ` +
-          `order_id=${orderId ?? 'unknown'}, ` +
-          `payment_intent_id=${paymentIntent.id}, ` +
-          `status=${paymentIntent.status}, ` +
-          `error_code=${paymentError?.code ?? 'unknown'}, ` +
-          `decline_code=${paymentError?.decline_code ?? 'unknown'}, ` +
-          `error_message=${paymentError?.message ?? 'unknown'}`,
-      );
+      if (session.payment_status === 'paid') {
+        this.logger.warn(
+          `Ignoring expiration for paid checkout. ` +
+            `order_id=${orderId}, ` +
+            `session_id=${providerReferenceId}`,
+        );
+
+        return;
+      }
 
       this.logger.log(
-        `Payment failure event processed without closing checkout. ` +
-          `order_id=${orderId ?? 'unknown'}, ` +
-          `payment_intent_id=${paymentIntent.id}`,
+        `Processing expired checkout session. ` +
+          `event_id=${event.id}, ` +
+          `order_id=${orderId}, ` +
+          `session_id=${providerReferenceId}`,
+      );
+
+      await this.paymentGatewayWebhookEventsRepository.insert({
+        order_id: orderId,
+        provider_reference_id: providerReferenceId,
+        provider: 'STRIPE',
+        process: 'PROCESSING',
+        amount_total: session.amount_total,
+        payment_status: 'FAILED',
+        currency: session.currency ?? 'usd',
+        event_created_at: event.created,
+        expires_at: session.expires_at,
+        receipt_url: null,
+        error_code: 'checkout_session_expired',
+        error_decline_code: null,
+        error_message: 'Stripe Checkout Session expired',
+      });
+
+      this.logger.log(
+        `Successfully saved expired checkout webhook. ` +
+          `order_id=${orderId}, ` +
+          `provider_reference_id=${providerReferenceId}`,
+      );
+
+      await this.paymentMessageProducer.emitFailed({
+        order_id: orderId,
+        provider_reference_id: providerReferenceId,
+        error_code: 'checkout_session_expired',
+        error_decline_code: null,
+        error_message: 'Stripe Checkout Session expired',
+      });
+
+      this.logger.log(
+        `Successfully published checkout expiration message. ` +
+          `order_id=${orderId}, ` +
+          `provider_reference_id=${providerReferenceId}`,
       );
     } catch (error) {
       const err = error as Error;
 
       this.logger.error(
-        `Failed to handle Stripe payment failure event_id=${event.id}`,
+        `Failed to handle expired checkout session. ` +
+          `event_id=${event.id}, ` +
+          `order_id=${orderId ?? 'unknown'}, ` +
+          `session_id=${providerReferenceId}`,
         err.stack,
       );
 
