@@ -350,4 +350,84 @@ export class StripeService implements IPaymentGateway {
       throw error;
     }
   }
+
+  async expireCheckoutSession(
+    sessionId: string,
+  ): Promise<'EXPIRED' | 'PAID' | 'UNRESOLVED'> {
+    try {
+      const session =
+        await this.stripeClient.checkout.sessions.retrieve(sessionId);
+
+      if (session.payment_status === 'paid') {
+        this.logger.warn(
+          `Checkout session=${sessionId} already has a confirmed payment`,
+        );
+
+        return 'PAID';
+      }
+
+      if (session.status === 'expired') {
+        this.logger.log(`Checkout session=${sessionId} is already expired`);
+
+        return 'EXPIRED';
+      }
+
+      if (session.status === 'complete') {
+        this.logger.warn(
+          `Checkout session=${sessionId} is completed but payment_status=${session.payment_status}`,
+        );
+
+        return 'UNRESOLVED';
+      }
+
+      if (session.status !== 'open') {
+        this.logger.warn(
+          `Unexpected Stripe checkout status=${session.status} for session=${sessionId}`,
+        );
+
+        return 'UNRESOLVED';
+      }
+
+      try {
+        const expiredSession =
+          await this.stripeClient.checkout.sessions.expire(sessionId);
+
+        if (expiredSession.status !== 'expired') {
+          throw new Error(
+            `Stripe did not confirm expiration for session=${sessionId}`,
+          );
+        }
+
+        this.logger.log(`Successfully expired checkout session=${sessionId}`);
+
+        return 'EXPIRED';
+      } catch (error) {
+        const currentSession =
+          await this.stripeClient.checkout.sessions.retrieve(sessionId);
+
+        if (currentSession.payment_status === 'paid') {
+          return 'PAID';
+        }
+
+        if (currentSession.status === 'expired') {
+          return 'EXPIRED';
+        }
+
+        if (currentSession.status === 'complete') {
+          return 'UNRESOLVED';
+        }
+
+        throw error;
+      }
+    } catch (error) {
+      const err = error as Error;
+
+      this.logger.error(
+        `Failed to expire Stripe checkout session=${sessionId}`,
+        err.stack,
+      );
+
+      throw error;
+    }
+  }
 }

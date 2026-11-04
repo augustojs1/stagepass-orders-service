@@ -1,4 +1,5 @@
 export const configuration = () => ({
+  app_host: process.env.APP_HOST,
   NODE_ENV: process.env.NODE_ENV,
   port: parseInt(process.env.PORT, 10) || 8080,
   database: {

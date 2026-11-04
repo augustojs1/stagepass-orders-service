@@ -11,6 +11,11 @@ import { PaymentOrdersModule } from '../payment-orders/payment-orders.module';
 import { PaymentGatewayModule } from '@/infra/payment-gateway/payment-gateway.module';
 
 @Module({
+  imports: [
+    EventsModule,
+    forwardRef(() => PaymentOrdersModule),
+    forwardRef(() => PaymentGatewayModule),
+  ],
   controllers: [OrdersController],
   providers: [
     OrdersRepository,
@@ -20,10 +25,5 @@ import { PaymentGatewayModule } from '@/infra/payment-gateway/payment-gateway.mo
     DateProvider,
   ],
   exports: [OrdersRepository, OrdersService, DateProvider],
-  imports: [
-    EventsModule,
-    forwardRef(() => PaymentOrdersModule),
-    PaymentGatewayModule,
-  ],
 })
 export class OrdersModule {}

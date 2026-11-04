@@ -9,14 +9,14 @@ import { PaymentGatewayModule } from '@/infra/payment-gateway/payment-gateway.mo
 import { MessagesModule } from '@/infra/messages/messages.module';
 
 @Module({
-  providers: [PaymentOrdersService, PaymentOrdersRepository],
   imports: [
     forwardRef(() => OrdersModule),
     EventTicketReservationsModule,
     EventTicketsModule,
-    PaymentGatewayModule,
+    forwardRef(() => PaymentGatewayModule),
     forwardRef(() => MessagesModule),
   ],
+  providers: [PaymentOrdersService, PaymentOrdersRepository],
   exports: [PaymentOrdersService],
 })
 export class PaymentOrdersModule {}
