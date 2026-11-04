@@ -11,7 +11,7 @@ import {
   ConflictException,
 } from '@nestjs/common';
 import { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-import { and, count, eq, inArray, gt } from 'drizzle-orm';
+import { and, count, eq, inArray, gt, desc } from 'drizzle-orm';
 
 import { OrdersRepository } from './orders.repository';
 import { OrderEmailTemplateData } from '../emails/models';
@@ -491,15 +491,21 @@ export class OrdersService {
   }
 
   private async createCheckout(
-    order: { id: string; total_price: number },
+    order: {
+      id: string;
+      total_price: number;
+    },
     provider: PaymentProviders,
-  ) {
+    idempotencyKey: string,
+  ): Promise<CheckoutSessionData> {
     switch (provider) {
       case PaymentProviders.STRIPE:
         return this.paymentGateway.process({
           order_id: order.id,
           amount: order.total_price,
+          idempotency_key: idempotencyKey,
         });
+
       default:
         throw new UnprocessableEntityException('Unsupported payment provider');
     }
@@ -525,144 +531,205 @@ export class OrdersService {
     pay_order_dto: PayOrderDto,
   ): Promise<PayOrderCheckoutResponseDto> {
     try {
-      const order = await this.findOneElseThrow(order_id);
+      return await this.drizzle.transaction(async (trx) => {
+        const [order] = await trx
+          .select()
+          .from(schema.orders)
+          .where(eq(schema.orders.id, order_id))
+          .for('update');
 
-      if (order.status === 'PAID') {
-        const paymentOrder =
-          await this.paymentOrdersService.findLastPaymentOrderByOrderBy(
-            order.id,
+        if (!order) {
+          throw new NotFoundException(`Order order_id=${order_id} not found`);
+        }
+
+        if (order.user_id !== user_id) {
+          throw new ForbiddenException(
+            `User does not own order_id=${order_id}`,
           );
+        }
 
-        return {
-          status: 'SUCCEEDED',
-          receipt_url: paymentOrder.receipt_url,
-          provider: paymentOrder.provider as PaymentProviders,
-          checkout_url: null,
-          checkout_url_expires_at:
-            paymentOrder.checkout_url_expires_at?.toISOString() ?? null,
-        };
-      }
+        if (order.status === 'PAID') {
+          const [successfulPayment] = await trx
+            .select()
+            .from(schema.payment_orders)
+            .where(
+              and(
+                eq(schema.payment_orders.order_id, order.id),
+                eq(schema.payment_orders.status, 'SUCCEEDED'),
+              ),
+            )
+            .orderBy(
+              desc(schema.payment_orders.created_at),
+              desc(schema.payment_orders.id),
+            )
+            .limit(1);
 
-      if (this.dateProvider.isExpired(String(order.reservation_expires_at))) {
-        this.logger.error(`Order ${order.id} reservation is expired!`);
-        throw new ConflictException(`Can not pay an expired order!`);
-      }
+          if (!successfulPayment) {
+            throw new ConflictException(
+              `Order ${order.id} is PAID but no successful payment exists`,
+            );
+          }
 
-      if (user_id !== order.user_id) {
-        this.logger.error(`User ${user_id} does not own order ${order.id}`);
-        throw new ForbiddenException(`User does not own order!`);
-      }
+          return {
+            status: 'SUCCEEDED',
+            receipt_url: successfulPayment.receipt_url,
+            provider: successfulPayment.provider as PaymentProviders,
+            checkout_url: null,
+            checkout_url_expires_at: null,
+          };
+        }
 
-      if (order.status !== 'AWAITING_PAYMENT') {
-        this.logger.error(
-          'Order items can only be paid when order status is AWAITING_PAYMENT',
-        );
-        throw new UnprocessableEntityException(
-          'Order items can only be paid when order status is AWAITING_PAYMENT',
-        );
-      }
+        if (order.status !== 'AWAITING_PAYMENT') {
+          throw new UnprocessableEntityException(
+            `Order ${order.id} cannot be paid with status=${order.status}`,
+          );
+        }
 
-      this.logger.log(
-        `Init order payment via ${pay_order_dto.payment_provider} provider!`,
-      );
+        if (!order.reservation_expires_at) {
+          throw new ConflictException(
+            `Order ${order.id} has no active reservation`,
+          );
+        }
 
-      const paymentOrder =
-        await this.paymentOrdersService.findLastPaymentOrderByOrderBy(order.id);
+        const reservationExpiresAt = new Date(order.reservation_expires_at);
 
-      if (!paymentOrder) {
+        if (
+          Number.isNaN(reservationExpiresAt.getTime()) ||
+          this.dateProvider.isExpired(reservationExpiresAt)
+        ) {
+          throw new ConflictException(
+            `Reservation expired for order_id=${order.id}`,
+          );
+        }
+
+        const provider = PaymentProviders[pay_order_dto.payment_provider];
+
+        if (provider !== PaymentProviders.STRIPE) {
+          throw new UnprocessableEntityException(
+            'Unsupported payment provider',
+          );
+        }
+
+        const [paymentOrder] = await trx
+          .select()
+          .from(schema.payment_orders)
+          .where(eq(schema.payment_orders.order_id, order.id))
+          .orderBy(
+            desc(schema.payment_orders.created_at),
+            desc(schema.payment_orders.id),
+          )
+          .limit(1);
+
+        if (paymentOrder?.status === 'SUCCEEDED') {
+          throw new ConflictException(
+            `Payment already succeeded for order_id=${order.id}, but order is not PAID`,
+          );
+        }
+
+        // Reutiliza uma sessão pendente que ainda esteja
+        // dentro do prazo de validade registrado.
+        if (paymentOrder?.status === 'PENDING') {
+          if (
+            !paymentOrder.checkout_url ||
+            !paymentOrder.checkout_url_expires_at
+          ) {
+            throw new ConflictException(
+              `Payment ${paymentOrder.id} has incomplete checkout data`,
+            );
+          }
+
+          if (
+            this.dateProvider.isExpired(paymentOrder.checkout_url_expires_at)
+          ) {
+            throw new ConflictException(
+              `Checkout session expired for order_id=${order.id}. Payment reconciliation required.`,
+            );
+          }
+
+          this.logger.log(`Reusing Stripe checkout for order_id=${order.id}`);
+
+          return {
+            status: 'PENDING',
+            receipt_url: paymentOrder.receipt_url,
+            provider: paymentOrder.provider as PaymentProviders,
+            checkout_url: paymentOrder.checkout_url,
+            checkout_url_expires_at:
+              paymentOrder.checkout_url_expires_at.toISOString(),
+          };
+        }
+
+        if (
+          paymentOrder &&
+          paymentOrder.status !== 'FAILED' &&
+          paymentOrder.status !== 'CANCELLED'
+        ) {
+          throw new ConflictException(
+            `Cannot create checkout for payment status=${paymentOrder.status}`,
+          );
+        }
+
+        const idempotencyKey = paymentOrder
+          ? `stagepass:checkout:${order.id}:after:${paymentOrder.id}`
+          : `stagepass:checkout:${order.id}:initial`;
+
+        this.logger.log(`Creating Stripe checkout for order_id=${order.id}`);
+
         const checkoutData = await this.createCheckout(
-          order,
-          PaymentProviders[pay_order_dto.payment_provider],
+          {
+            id: order.id,
+            total_price: order.total_price,
+          },
+          provider,
+          idempotencyKey,
         );
 
-        await this.paymentOrdersService.create({
+        if (this.dateProvider.isExpired(reservationExpiresAt)) {
+          throw new ConflictException(
+            `Reservation expired while creating checkout for order_id=${order.id}`,
+          );
+        }
+
+        const checkoutExpiresAt = this.dateProvider.unixToDate(
+          checkoutData.checkout_url_expires_at,
+        );
+
+        if (
+          !checkoutData.checkout_url ||
+          checkoutExpiresAt.getTime() <= Date.now()
+        ) {
+          throw new ConflictException(
+            `Stripe returned an invalid checkout session for order_id=${order.id}`,
+          );
+        }
+
+        await trx.insert(schema.payment_orders).values({
           order_id: order.id,
           amount: order.total_price,
           currency: 'USD',
-          provider: PaymentProviders.STRIPE,
+          provider: 'STRIPE',
           provider_reference_id: checkoutData.provider_reference_id,
           status: 'PENDING',
           checkout_url: checkoutData.checkout_url,
-          checkout_url_expires_at: this.dateProvider.unixToDate(
-            checkoutData.checkout_url_expires_at,
-          ),
+          checkout_url_expires_at: checkoutExpiresAt,
         });
 
-        return this.createPendingResponse(checkoutData);
-      }
-
-      if (
-        paymentOrder.status === 'PENDING' &&
-        this.dateProvider.isExpired(
-          String(paymentOrder.checkout_url_expires_at),
-        )
-      ) {
-        paymentOrder.status = 'FAILED';
-
-        const checkoutData = await this.createCheckout(
-          order,
-          PaymentProviders[pay_order_dto.payment_provider],
-        );
-
-        await this.paymentOrdersService.updateAndCreateNewPaymentOrderTransaction(
-          checkoutData,
-          paymentOrder,
+        this.logger.log(
+          `Successfully created payment for order_id=${order.id}, provider_reference_id=${checkoutData.provider_reference_id}`,
         );
 
         return this.createPendingResponse(checkoutData);
-      }
-
-      if (paymentOrder.status === 'PENDING') {
-        return this.pendingResponseFromPaymentOrder(paymentOrder);
-      }
-
-      const shouldCreateNewOrderPaymentStatuses = new Set([
-        'CANCELLED',
-        'FAILED',
-      ]);
-
-      if (shouldCreateNewOrderPaymentStatuses.has(paymentOrder.status)) {
-        const checkoutData = await this.createCheckout(
-          order,
-          PaymentProviders[pay_order_dto.payment_provider],
-        );
-
-        await this.paymentOrdersService.create({
-          order_id: order.id,
-          amount: order.total_price,
-          currency: 'USD',
-          provider: PaymentProviders.STRIPE,
-          provider_reference_id: checkoutData.provider_reference_id,
-          status: 'PENDING',
-          checkout_url: checkoutData.checkout_url,
-          checkout_url_expires_at: this.dateProvider.unixToDate(
-            checkoutData.checkout_url_expires_at,
-          ),
-        });
-
-        return this.createPendingResponse(checkoutData);
-      }
-
-      if (paymentOrder.status === 'SUCCEEDED') {
-        return {
-          receipt_url: paymentOrder.receipt_url,
-          status: 'SUCCEEDED',
-          provider: PaymentProviders[paymentOrder.provider],
-          checkout_url: null,
-          checkout_url_expires_at: null,
-        };
-      }
-
-      throw new InternalServerErrorException('Unhandled payment order status');
+      });
     } catch (error) {
-      const e = error as Error;
+      const err = error as Error;
 
       this.logger.error(
-        `Failed to pay for order order_id=${order_id}, item user_id=${user_id}`,
-        e?.stack,
+        `Failed to create or retrieve checkout for order_id=${order_id}, user_id=${user_id}`,
+        err.stack,
       );
 
-      if (error instanceof HttpException) throw error;
+      if (error instanceof HttpException) {
+        throw error;
+      }
 
       throw new InternalServerErrorException('Failed to pay order');
     }

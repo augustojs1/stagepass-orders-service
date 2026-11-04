@@ -36,35 +36,65 @@ export class StripeService implements IPaymentGateway {
   public async process(
     data: OrderPaymentPayload,
   ): Promise<CheckoutSessionData> {
-    this.logger.log('Stripe received payment to process', data);
+    this.logger.log(`Creating Stripe checkout for order_id=${data.order_id}`);
 
     try {
-      const session = await this.stripeClient.checkout.sessions.create({
-        payment_method_types: ['card'],
-        line_items: [
-          {
-            price_data: {
-              currency: 'usd',
-              product_data: {
-                name: `Order #${data.order_id}`,
-              },
-              unit_amount: data.amount,
-            },
-            quantity: 1,
-          },
-        ],
-        mode: 'payment',
-        success_url: `https://stagepass.augustojsdev.com.br/payment/success?orderId=${data.order_id}`,
-        cancel_url: `https://stagepass.augustojsdev.com.br/payment/failed?orderId=${data.order_id}`,
-        metadata: {
-          orderId: data.order_id,
-        },
-        payment_intent_data: {
-          metadata: { orderId: data.order_id },
-        },
-      });
+      if (!data.idempotency_key) {
+        throw new Error(
+          `Stripe idempotency key is required for order_id=${data.order_id}`,
+        );
+      }
 
-      this.logger.log('Stripe successfully processed payment', data);
+      if (!Number.isSafeInteger(data.amount) || data.amount <= 0) {
+        throw new Error(`Invalid payment amount for order_id=${data.order_id}`);
+      }
+
+      const session = await this.stripeClient.checkout.sessions.create(
+        {
+          payment_method_types: ['card'],
+          line_items: [
+            {
+              price_data: {
+                currency: 'usd',
+                product_data: {
+                  name: `Order #${data.order_id}`,
+                },
+                unit_amount: data.amount,
+              },
+              quantity: 1,
+            },
+          ],
+          mode: 'payment',
+          success_url:
+            `https://stagepass.augustojsdev.com.br/payment/success` +
+            `?orderId=${data.order_id}`,
+          cancel_url:
+            `https://stagepass.augustojsdev.com.br/payment/failed` +
+            `?orderId=${data.order_id}`,
+          client_reference_id: data.order_id,
+          metadata: {
+            orderId: data.order_id,
+          },
+          payment_intent_data: {
+            metadata: {
+              orderId: data.order_id,
+            },
+          },
+        },
+        {
+          idempotencyKey: data.idempotency_key,
+        },
+      );
+
+      if (!session.url) {
+        throw new Error(
+          `Stripe returned checkout session without URL for order_id=${data.order_id}`,
+        );
+      }
+
+      this.logger.log(
+        `Successfully created Stripe checkout session_id=${session.id}, order_id=${data.order_id}`,
+      );
 
       return {
         provider: PaymentProviders.STRIPE,
@@ -73,7 +103,13 @@ export class StripeService implements IPaymentGateway {
         checkout_url_expires_at: session.expires_at,
       };
     } catch (error) {
-      this.logger.error('Stripe error processing a payment', data);
+      const err = error as Error;
+
+      this.logger.error(
+        `Failed to create Stripe checkout for order_id=${data.order_id}`,
+        err.stack,
+      );
+
       throw error;
     }
   }
