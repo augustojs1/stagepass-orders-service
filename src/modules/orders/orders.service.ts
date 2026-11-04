@@ -133,50 +133,87 @@ export class OrdersService {
     createOrderItemDto: CreateOrderItemDto,
   ): Promise<OrderItemResponseDto[]> {
     try {
-      const order = await this.findOneElseThrow(order_id);
+      const orderItems = await this.drizzle.transaction(async (trx) => {
+        const [order] = await trx
+          .select()
+          .from(schema.orders)
+          .where(eq(schema.orders.id, order_id))
+          .for('update');
 
-      if (user_id !== order.user_id) {
-        this.logger.error(`User ${user_id} does not own order ${order.id}`);
-        throw new ForbiddenException(`User does not own order!`);
-      }
+        if (!order) {
+          throw new NotFoundException(`Order order_id=${order_id} not found!`);
+        }
 
-      const eventTicket = await this.eventsService.findEventTicketByIdElseThrow(
-        createOrderItemDto.event_ticket_id,
-      );
+        if (order.user_id !== user_id) {
+          throw new ForbiddenException(
+            `User does not own order_id=${order_id}!`,
+          );
+        }
 
-      if (order.event_id !== eventTicket.event_id) {
-        this.logger.error(
-          `event_ticket_id=${eventTicket.id} does not belong to order=${order.id} !`,
+        if (order.status !== 'PENDING') {
+          throw new UnprocessableEntityException(
+            `Cannot add items to order_id=${order_id} with status=${order.status}`,
+          );
+        }
+
+        const [eventTicket] = await trx
+          .select()
+          .from(schema.event_tickets)
+          .where(
+            eq(schema.event_tickets.id, createOrderItemDto.event_ticket_id),
+          )
+          .limit(1);
+
+        if (!eventTicket) {
+          throw new NotFoundException(
+            `Event ticket_id=${createOrderItemDto.event_ticket_id} not found!`,
+          );
+        }
+
+        if (eventTicket.event_id !== order.event_id) {
+          throw new BadRequestException(
+            `Event ticket does not belong to order event!`,
+          );
+        }
+
+        if (eventTicket.sold || eventTicket.amount <= 0) {
+          throw new ConflictException(
+            `Event ticket_id=${eventTicket.id} is sold out!`,
+          );
+        }
+
+        const [createdOrderItem] = await trx
+          .insert(schema.order_item)
+          .values({
+            order_id: order.id,
+            event_ticket_id: eventTicket.id,
+            unit_price: eventTicket.price,
+            owner_name: createOrderItemDto.owner_name,
+            owner_email: createOrderItemDto.owner_email,
+          })
+          .returning();
+
+        this.logger.log(
+          `Successfully created order_item_id=${createdOrderItem.id} for order_id=${order_id}`,
         );
-        throw new BadRequestException(
-          `Event ticket does not belong to order event!`,
-        );
-      }
 
-      if (eventTicket.sold || eventTicket.amount <= 0) {
-        this.logger.error(`Event ticket ${eventTicket.id} is sold out!`);
-        throw new BadRequestException('Tickets for this event is sold out!');
-      }
+        const items = await trx
+          .select()
+          .from(schema.order_item)
+          .where(eq(schema.order_item.order_id, order_id));
 
-      const orderItem = await this.ordersRepository.insertOrderItem({
-        order_id: order.id,
-        event_ticket_id: eventTicket.id,
-        unit_price: eventTicket.price,
-        owner_email: createOrderItemDto.owner_email,
-        owner_name: createOrderItemDto.owner_name,
+        return items;
       });
 
-      this.logger.log(`Succesfully created order item ${orderItem.id}`);
-
       return this.ordersMapper.mapOrderItemEntityToOrderItemResponseDto(
-        await this.ordersRepository.findOrderItemByOrderId(orderItem.order_id),
+        orderItems,
       );
     } catch (error) {
-      const e = error as Error;
+      const err = error as Error;
 
       this.logger.error(
-        `Failed to create order item user_id=${user_id}, order_id=${order_id} event_ticket_id=${createOrderItemDto.event_ticket_id}!`,
-        e?.stack,
+        `Failed to create order item user_id=${user_id}, order_id=${order_id}, event_ticket_id=${createOrderItemDto.event_ticket_id}`,
+        err.stack,
       );
 
       if (error instanceof HttpException) {
@@ -193,40 +230,75 @@ export class OrdersService {
     order_item_id: string,
   ): Promise<void> {
     try {
-      const order = await this.findOneElseThrow(order_id);
+      await this.drizzle.transaction(async (trx) => {
+        const [order] = await trx
+          .select()
+          .from(schema.orders)
+          .where(eq(schema.orders.id, order_id))
+          .for('update');
 
-      if (user_id !== order.user_id) {
-        this.logger.error(`User ${user_id} does not own order ${order.id}`);
-        throw new ForbiddenException(`User does not own order!`);
-      }
+        if (!order) {
+          throw new NotFoundException(`Order order_id=${order_id} not found!`);
+        }
 
-      if (order.status !== 'PENDING') {
-        this.logger.error(
-          'Order items can only be removed when order status is PENDING',
+        if (order.user_id !== user_id) {
+          throw new ForbiddenException(
+            `User does not own order_id=${order_id}!`,
+          );
+        }
+
+        if (order.status !== 'PENDING') {
+          throw new UnprocessableEntityException(
+            `Cannot remove items from order_id=${order_id} with status=${order.status}`,
+          );
+        }
+
+        const [orderItem] = await trx
+          .select()
+          .from(schema.order_item)
+          .where(eq(schema.order_item.id, order_item_id))
+          .limit(1);
+
+        if (!orderItem) {
+          throw new NotFoundException(
+            `Order item order_item_id=${order_item_id} not found!`,
+          );
+        }
+
+        if (orderItem.order_id !== order.id) {
+          throw new ForbiddenException(
+            `Order item order_item_id=${order_item_id} does not belong to order_id=${order_id}!`,
+          );
+        }
+
+        const [deletedOrderItem] = await trx
+          .delete(schema.order_item)
+          .where(
+            and(
+              eq(schema.order_item.id, order_item_id),
+              eq(schema.order_item.order_id, order_id),
+            ),
+          )
+          .returning({
+            id: schema.order_item.id,
+          });
+
+        if (!deletedOrderItem) {
+          throw new NotFoundException(
+            `Order item order_item_id=${order_item_id} could not be deleted!`,
+          );
+        }
+
+        this.logger.log(
+          `Successfully removed order_item_id=${order_item_id} from order_id=${order_id}`,
         );
-        throw new UnprocessableEntityException(
-          'Order items can only be removed when order status is PENDING',
-        );
-      }
-
-      const orderItem = await this.findOneItemElseThrow(order_item_id);
-
-      if (order.id !== orderItem.order_id) {
-        this.logger.error(
-          `Order item ${orderItem.id} is not related to order ${order.id}`,
-        );
-        throw new ForbiddenException(
-          `Order item should be related to the order`,
-        );
-      }
-
-      await this.ordersRepository.deleteOrderItemById(orderItem.id);
+      });
     } catch (error) {
-      const e = error as Error;
+      const err = error as Error;
 
       this.logger.error(
-        `Failed to delete order item user_id=${user_id}, order_id=${order_id}, order_item_id=${order_item_id}`,
-        e?.stack,
+        `Failed to remove order item user_id=${user_id}, order_id=${order_id}, order_item_id=${order_item_id}`,
+        err.stack,
       );
 
       if (error instanceof HttpException) {
