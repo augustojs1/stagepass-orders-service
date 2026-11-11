@@ -1,7 +1,7 @@
 {
-  "name": "stagepass-workers",
-  "version": "0.0.1",
-  "description": "StagePass Workers handles background jobs like reservations expiration, automated PDF generation, payments processing and emails.",
+  "name": "stagepass-orders-service",
+  "version": "1.0.1",
+  "description": "A NestJS-based event ticketing API featuring concurrent ticket reservations, Stripe payments, asynchronous processing with AWS SQS, and automated ticket generation and delivery.",
   "author": "Augusto Souza",
   "private": true,
   "license": "UNLICENSED",
